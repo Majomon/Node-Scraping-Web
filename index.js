@@ -10,7 +10,7 @@ const AGENCY_URL =
   "https://www.zonaprop.com.ar/inmobiliarias/gimenez-inmuebles_17062722-inmuebles.html";
 const OUTPUT_FILE = "propiedades_gimenez.xlsx";
 
-// Columnas solicitadas (limpiadas y ordenadas)
+// Columnas finales solicitadas
 const COLUMNS = [
   "id",
   "url",
@@ -34,8 +34,7 @@ const COLUMNS = [
 async function getPropertyDetails(page, url) {
   try {
     console.log(`Scrapeando detalle: ${url}`);
-
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
 
     try {
       await page.waitForSelector(".price-value, .icon-feature", {
@@ -46,7 +45,6 @@ async function getPropertyDetails(page, url) {
     const content = await page.content();
     let data = null;
 
-    // 1. Intentar capturar JSON del estado inicial (para datos limpios)
     data = await page.evaluate(() => {
       const state =
         window.__INITIAL_STATE__ || window.__NEXT_DATA__?.props?.pageProps;
@@ -68,14 +66,12 @@ async function getPropertyDetails(page, url) {
     prop["id"] = url.match(/(\d+)\.html/)?.[1] || "";
 
     if (data) {
-      // Mapeo desde JSON
       prop["operacion"] = data.operationType?.name || "";
       prop["precio"] = data.price?.amount || "";
       prop["moneda"] = data.price?.currency || "";
       if (prop["moneda"] === "USD" || prop["moneda"] === "U$S")
         prop["moneda"] = "USD";
       else if (prop["moneda"] === "$") prop["moneda"] = "ARS";
-
       prop["expensas"] = data.price?.expenses || "";
 
       const loc = data.location || {};
@@ -95,27 +91,20 @@ async function getPropertyDetails(page, url) {
       prop["antiguedad"] = f.age?.value || "";
     }
 
-    // 2. SCRAPING DE DOM (Para corregir moneda y capturar clases específicas de características)
     const domData = await page.evaluate(() => {
       const getTxt = (sel) =>
         document.querySelector(sel)?.innerText?.trim() || "";
-
-      // Detección refinada de Precio, Moneda y Operación
       const priceEl = document.querySelector(".price-value");
-      let operacion = "";
-      let moneda = "ARS"; // Default
-      let monto = "";
+      let operacion = "",
+        moneda = "ARS",
+        monto = "";
 
       if (priceEl) {
         const fullPriceText = priceEl.innerText.trim();
-        // El primer span suele ser "Venta" o "Alquiler"
         operacion = priceEl.querySelector("span")?.innerText.trim() || "";
-
-        if (fullPriceText.includes("USD") || fullPriceText.includes("U$S")) {
+        if (fullPriceText.includes("USD") || fullPriceText.includes("U$S"))
           moneda = "USD";
-        } else if (fullPriceText.includes("$")) {
-          moneda = "ARS";
-        }
+        else if (fullPriceText.includes("$")) moneda = "ARS";
         monto = fullPriceText.replace(/[^\d]/g, "");
       }
 
@@ -143,23 +132,19 @@ async function getPropertyDetails(page, url) {
       };
     });
 
-    // REFINAMIENTO FINAL DE DATOS
     if (!prop["moneda"] || prop["moneda"] === "ARS")
       prop["moneda"] = domData.moneda;
-
-    // Limpieza de la operación para quedarnos solo con el tipo (Venta/Alquiler)
-    // Usamos un split que corta en cuanto encuentra un símbolo de moneda o un número
     let rawOp = prop["operacion"] || domData.operacion || "";
     prop["operacion"] = rawOp.split(/USD|U\$S|\$|\d/i)[0].trim();
+    prop["precio"] = String(prop["precio"] || domData.precio).replace(
+      /[^\d]/g,
+      "",
+    );
+    prop["expensas"] = String(prop["expensas"] || domData.expensas).replace(
+      /[^\d]/g,
+      "",
+    );
 
-    // Limpieza de precio y expensas para que solo tengan números
-    let finalPrecio = prop["precio"] || domData.precio || "";
-    prop["precio"] = String(finalPrecio).replace(/[^\d]/g, "");
-
-    let finalExpensas = prop["expensas"] || domData.expensas || "";
-    prop["expensas"] = String(finalExpensas).replace(/[^\d]/g, "");
-
-    // Dirección
     if (!prop["calle"] && domData.fullAddress) {
       const parts = domData.fullAddress.split(",").map((p) => p.trim());
       if (parts.length > 0) {
@@ -170,7 +155,6 @@ async function getPropertyDetails(page, url) {
       if (parts.length > 2) prop["localidad"] = parts[2];
     }
 
-    // Características técnicas
     const parseNum = (txt) => (txt.match(/\d+/) ? txt.match(/\d+/)[0] : "");
     if (!prop["m2T"]) prop["m2T"] = parseNum(domData.m2T);
     if (!prop["m2C"]) prop["m2C"] = parseNum(domData.m2C);
@@ -200,66 +184,85 @@ async function run() {
   });
   const page = await context.newPage();
 
-  console.log(`Accediendo a la agencia: ${AGENCY_URL}`);
-  await page.goto(AGENCY_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-
   let propertyUrls = new Set();
-  let hasNextPage = true;
+  let pageNum = 1;
+  let consecutiveEmptyPages = 0;
 
-  while (hasNextPage) {
-    console.log("Extrayendo lista de propiedades...");
+  console.log("Iniciando recolección de URLs de todas las páginas...");
+
+  while (pageNum <= 20) {
+    // Límite de seguridad de 20 páginas
+    const currentUrl =
+      pageNum === 1
+        ? AGENCY_URL
+        : AGENCY_URL.replace(".html", `-pagina-${pageNum}.html`);
+
+    console.log(`Accediendo a la página ${pageNum}: ${currentUrl}`);
+
     try {
-      await page.waitForSelector(
+      await page.goto(currentUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      await page.waitForTimeout(4000); // Esperar a que carguen los resultados
+
+      const links = await page.$$eval(
         "a[data-to-posting], a[href*='/propiedades/']",
-        { timeout: 30000 },
+        (anchors) => anchors.map((a) => a.getAttribute("href")),
       );
-    } catch (e) {}
 
-    const links = await page.$$eval(
-      "a[data-to-posting], a[href*='/propiedades/']",
-      (anchors) => anchors.map((a) => a.getAttribute("href")),
-    );
+      let newLinksFound = 0;
+      links.forEach((link) => {
+        if (link && !link.includes("inmobiliarias") && link.includes(".html")) {
+          const fullUrl = link.startsWith("/") ? BASE_URL + link : link;
+          if (!propertyUrls.has(fullUrl)) {
+            propertyUrls.add(fullUrl);
+            newLinksFound++;
+          }
+        }
+      });
 
-    links.forEach((link) => {
-      if (link && !link.includes("inmobiliarias") && link.includes(".html")) {
-        const fullUrl = link.startsWith("/") ? BASE_URL + link : link;
-        propertyUrls.add(fullUrl);
-      }
-    });
+      console.log(
+        `Página ${pageNum}: ${newLinksFound} nuevas URLs encontradas (Total: ${propertyUrls.size})`,
+      );
 
-    console.log(`Propiedades encontradas: ${propertyUrls.size}`);
-
-    const nextButton = await page.$("a[data-qa='paging-next']");
-    if (nextButton) {
-      const isDisabled = await nextButton.getAttribute("disabled");
-      if (isDisabled !== null) {
-        hasNextPage = false;
+      if (newLinksFound === 0) {
+        consecutiveEmptyPages++;
       } else {
-        await nextButton.click();
-        await new Promise((r) => setTimeout(r, 4000));
+        consecutiveEmptyPages = 0;
       }
-    } else {
-      hasNextPage = false;
+
+      // Si no encontramos nada nuevo en 2 páginas seguidas, paramos
+      if (consecutiveEmptyPages >= 1) {
+        console.log(
+          "No se encontraron más propiedades nuevas. Finalizando recolección.",
+        );
+        break;
+      }
+
+      pageNum++;
+      await new Promise((r) => setTimeout(r, 2000));
+    } catch (e) {
+      console.error(`Error en página ${pageNum}:`, e.message);
+      break;
     }
   }
 
-  console.log(`\nIniciando extracción de ${propertyUrls.size} propiedades...`);
+  console.log(
+    `\nExtracción total: ${propertyUrls.size} propiedades encontradas.`,
+  );
   const results = [];
   const urlsArray = Array.from(propertyUrls);
 
   for (let i = 0; i < urlsArray.length; i++) {
-    const url = urlsArray[i];
-    const details = await getPropertyDetails(page, url);
+    const details = await getPropertyDetails(page, urlsArray[i]);
     if (details) {
       results.push(details);
       console.log(
         `[${i + 1}/${urlsArray.length}] - ${details.precio} ${details.moneda} - ${details.operacion}`,
       );
     }
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000 + Math.random() * 1000));
   }
 
   if (results.length > 0) {
@@ -267,9 +270,9 @@ async function run() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Propiedades");
     XLSX.writeFile(workbook, OUTPUT_FILE);
-    console.log(`\n¡Éxito! Archivo generado en: ${OUTPUT_FILE}`);
-  } else {
-    console.log("\nNo se pudieron extraer datos.");
+    console.log(
+      `\n¡Éxito! Archivo generado: ${OUTPUT_FILE} (${results.length} filas)`,
+    );
   }
 
   await browser.close();
