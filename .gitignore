@@ -1,0 +1,6 @@
+node_modules/
+propiedades_gimenez.xlsx
+package-lock.json
+.vscode/
+.DS_Store
+*.log

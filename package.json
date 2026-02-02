@@ -1,0 +1,16 @@
+{
+  "name": "zonaprop-scraper-node",
+  "version": "1.0.0",
+  "description": "Scraper para Zonaprop (Gimenez Inmuebles) en Node.js",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.41.0",
+    "playwright-extra": "^3.1.0",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "xlsx": "^0.18.5",
+    "csv-writer": "^1.6.0"
+  }
+}
